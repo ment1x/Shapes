@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>·</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { display: block; touch-action: none; }
+  #hint {
+    position: fixed;
+    bottom: max(env(safe-area-inset-bottom, 0px) + 24px, 40px);
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.18);
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    font-size: 11px;
+    font-weight: 300;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    pointer-events: none;
+    white-space: nowrap;
+    transition: opacity 2.5s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">berühre die formen</div>
+<script>
+
+// ─── PWA Manifest (blob URL) ────────────────────────────────────────────────
+try {
+  const m = { name:'Shapes', short_name:'Shapes', start_url:'.', display:'standalone',
+              background_color:'#000000', theme_color:'#000000', icons:[] };
+  const lnk = Object.assign(document.createElement('link'), {
+    rel: 'manifest',
+    href: URL.createObjectURL(new Blob([JSON.stringify(m)], { type:'application/manifest+json' }))
+  });
+  document.head.appendChild(lnk);
+} catch(e) {}
+
+// ─── Canvas setup with HiDPI ────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const DPR    = Math.min(window.devicePixelRatio || 1, 2);
+let W = 0, H = 0;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(DPR, DPR);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─── Web Audio — singing-bowl pentatonic tones ───────────────────────────────
+let ac = null;
+
+function touchAudio() {
+  if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+  if (ac.state === 'suspended') ac.resume();
+}
+
+// G3 → E5 from C major pentatonic (warm mid range)
+const NOTES = [196.00, 220.00, 261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
+
+function playNote(freq) {
+  touchAudio();
+  const t = ac.currentTime;
+  const master = ac.createGain();
+  master.gain.setValueAtTime(0, t);
+  master.gain.linearRampToValueAtTime(0.30, t + 0.008);
+  master.gain.setValueAtTime(0.30, t + 0.06);
+  master.gain.exponentialRampToValueAtTime(0.001, t + 3.8);
+  master.connect(ac.destination);
+  [[1, 1.0], [2, 0.20], [3, 0.07], [4.07, 0.04]].forEach(([mult, amp]) => {
+    const g = ac.createGain(); g.gain.value = amp;
+    const o = ac.createOscillator();
+    o.type = 'sine';
+    o.frequency.value = freq * mult;
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t + 3.8 / Math.max(1, mult * 0.8));
+  });
+}
+
+// ─── [1] Vivid / punchy colors ──────────────────────────────────────────────
+const COLORS = [
+  [255,  30, 120],  // neon crimson-pink
+  [180,  60, 255],  // electric violet
+  [  0, 210, 255],  // laser cyan
+  [ 30, 255, 130],  // vivid mint
+  [255, 210,   0],  // bright gold
+  [255,  80,  20],  // hot orange
+  [ 80, 100, 255],  // electric blue
+  [255,  60, 200],  // magenta
+];
+let colorCursor = Math.floor(Math.random() * COLORS.length);
+function nextColor() { return COLORS[colorCursor++ % COLORS.length]; }
+function rgba([r,g,b], a) { return `rgba(${r},${g},${b},${a})`; }
+
+// ─── [4] Vibration patterns per shape ───────────────────────────────────────
+// circle   → long single throb
+// square   → heavy double knock (second harder)
+// triangle → triple tap with rising intensity
+const VIBRATIONS = {
+  circle:   [180],
+  square:   [90, 60, 160],
+  triangle: [70, 45, 80, 45, 160],
+};
+function vibrate(type) {
+  try { navigator.vibrate && navigator.vibrate(VIBRATIONS[type] || [40]); } catch(e) {}
+}
+
+// ─── Shape factory ───────────────────────────────────────────────────────────
+const TYPES = ['circle', 'square', 'triangle'];
+
+function spawn() {
+  const m    = 110;
+  const size = 30 + Math.random() * 40;
+  const ang  = Math.random() * Math.PI * 2;
+  const spd  = 0.10 + Math.random() * 0.13;
+  return {
+    type:  TYPES[Math.floor(Math.random() * 3)],
+    color: nextColor(),
+    x:  m + Math.random() * (W - m * 2),
+    y:  m + Math.random() * (H - m * 2),
+    size,
+    vx: Math.cos(ang) * spd,
+    vy: Math.sin(ang) * spd,
+    rot:  Math.random() * Math.PI * 2,
+    rotV: (Math.random() - 0.5) * 0.0007,
+    pulse: {
+      ph:  Math.random() * Math.PI * 2,
+      spd: 0.007 + Math.random() * 0.005,
+      amt: 0.08  + Math.random() * 0.07,
+    },
+    opacity: 0,
+    state: 'in',   // in | live | flash | out
+    fp: 0,
+  };
+}
+
+// ─── [3] Halved spawn timing ─────────────────────────────────────────────────
+let shapes    = [];
+let lastSpawn = -Infinity;
+const SPAWN_INTERVAL = 2600;   // was 5200 ms → halved
+const MAX_SHAPES     = 3;
+
+function update(now) {
+  const alive = shapes.filter(s => s.state !== 'out').length;
+  if (alive < MAX_SHAPES && now - lastSpawn > SPAWN_INTERVAL) {
+    shapes.push(spawn());
+    lastSpawn = now;
+  }
+
+  for (const s of shapes) {
+    if (s.state === 'out') continue;
+
+    // Fade in (~2.5 s at 60 fps); tappable as soon as faintly visible
+    if (s.state === 'in') {
+      s.opacity += 0.007;
+      if (s.opacity >= 1) { s.opacity = 1; s.state = 'live'; }
+    }
+
+    // [2] Flash: longer zoom + slower fade (~1.1 s total)
+    if (s.state === 'flash') {
+      s.fp      += 0.022;            // was 0.045 → ~2.5× longer
+      s.opacity  = Math.max(0, 1 - s.fp * 1.05);  // slower opacity fade
+      if (s.fp >= 1) s.state = 'out';
+    }
+
+    // Drift + pulse + rotation
+    if (s.state !== 'flash') {
+      s.x += s.vx; s.y += s.vy;
+      const pad = s.size * 2;
+      if (s.x < pad || s.x > W - pad) s.vx *= -1;
+      if (s.y < pad || s.y > H - pad) s.vy *= -1;
+      s.pulse.ph += s.pulse.spd;
+      s.rot      += s.rotV;
+    }
+  }
+
+  shapes = shapes.filter(s => s.state !== 'out');
+}
+
+// ─── Rendering ───────────────────────────────────────────────────────────────
+function tracePath(type, size) {
+  ctx.beginPath();
+  if (type === 'circle') {
+    ctx.arc(0, 0, size, 0, Math.PI * 2);
+  } else if (type === 'square') {
+    ctx.rect(-size, -size, size * 2, size * 2);
+  } else {
+    ctx.moveTo(0,             -size);
+    ctx.lineTo( size * 0.866,  size * 0.5);
+    ctx.lineTo(-size * 0.866,  size * 0.5);
+    ctx.closePath();
+  }
+}
+
+function drawShape(s) {
+  if (s.opacity < 0.005) return;
+  const { type, color, state, fp } = s;
+  const pMult = state !== 'flash' ? 1 + Math.sin(s.pulse.ph) * s.pulse.amt : 1;
+  const size  = s.size * pMult;
+
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate(s.rot);
+  ctx.globalAlpha = s.opacity;
+
+  if (state === 'flash') {
+    // [2] Bigger, brighter bloom
+    const sc = 1 + fp * 1.6;          // was 0.75 → more zoom
+    ctx.scale(sc, sc);
+    const bloom = Math.max(0, 1 - fp * 0.7);
+    ctx.shadowColor = `rgba(255,255,255,${bloom})`;
+    ctx.shadowBlur  = 120 * (1 - fp * 0.5);  // was 70 → much brighter halo
+
+    // Extra outer glow pass for maximum brightness
+    tracePath(type, s.size * 1.3);
+    ctx.fillStyle = `rgba(255,255,255,${bloom * 0.35})`;
+    ctx.fill();
+
+    // Core white shape
+    tracePath(type, s.size);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+
+  } else {
+    // [1] Wider, more vivid stroke
+    ctx.shadowColor = rgba(color, 0.55);
+    ctx.shadowBlur  = 22 + Math.sin(s.pulse.ph) * 8;
+
+    // Translucent fill
+    tracePath(type, size);
+    ctx.fillStyle = rgba(color, 0.13);
+    ctx.fill();
+
+    // [1] Thicker glowing stroke
+    ctx.shadowColor = rgba(color, 1.0);
+    ctx.shadowBlur  = 14;
+    ctx.strokeStyle = rgba(color, 1.0);
+    ctx.lineWidth   = 3.5;            // was 1.6 → more than doubled
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  shapes.forEach(drawShape);
+}
+
+// ─── Main loop ───────────────────────────────────────────────────────────────
+function loop(now) {
+  update(now);
+  render();
+  requestAnimationFrame(loop);
+}
+
+shapes.push(spawn());
+lastSpawn = performance.now();
+requestAnimationFrame(loop);
+
+// ─── Hint ────────────────────────────────────────────────────────────────────
+const hint = document.getElementById('hint');
+setTimeout(() => { hint.style.opacity = '0'; }, 5000);
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+function onTap(cx, cy) {
+  touchAudio();
+  hint.style.opacity = '0';
+
+  let best = null, bestD = Infinity;
+  for (const s of shapes) {
+    if (s.state !== 'live' && !(s.state === 'in' && s.opacity > 0.12)) continue;
+    const dx = s.x - cx, dy = s.y - cy;
+    const d  = Math.hypot(dx, dy);
+    if (d < Math.max(s.size * 1.9, 80) && d < bestD) {
+      bestD = d; best = s;
+    }
+  }
+
+  if (best) {
+    best.state = 'flash';
+    best.fp    = 0;
+    playNote(NOTES[Math.floor(Math.random() * NOTES.length)]);
+    vibrate(best.type);   // [4] shape-specific vibration
+    // [3] Replacement spawns after ~1.5 s (halved from 3 s)
+    lastSpawn = performance.now() - SPAWN_INTERVAL + 1500;
+  }
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  onTap(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+}, { passive: false });
+
+canvas.addEventListener('click', e => onTap(e.clientX, e.clientY));
+
+</script>
+</body>
+</html>
